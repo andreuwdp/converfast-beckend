@@ -1,13 +1,10 @@
 from pathlib import Path
 from fastapi import HTTPException
-import subprocess
-import os
+import html as html_mod
+
 
 def pdf_to_word(input_path: Path, output_path: Path) -> Path:
-    """
-    Converte PDF in DOCX usando pdf2docx.
-    Mantiene testo, tabelle e formattazione base.
-    """
+    """Converte PDF in DOCX usando pdf2docx."""
     try:
         from pdf2docx import Converter
         cv = Converter(str(input_path))
@@ -17,206 +14,212 @@ def pdf_to_word(input_path: Path, output_path: Path) -> Path:
     except ImportError:
         raise HTTPException(status_code=500, detail="pdf2docx non installato.")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Errore conversione PDF→Word: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Errore PDF→Word: {str(e)}")
 
 
-def _docx_to_html(input_path: Path) -> str:
+def _docx_to_pdf_reportlab(input_path: Path, output_path: Path) -> Path:
     """
-    Converte DOCX in HTML usando python-docx.
-    Estrae testo, paragrafi, tabelle e stili base.
+    Converte DOCX in PDF usando python-docx + reportlab.
+    Puro Python, zero dipendenze di sistema.
     """
     from docx import Document
-    from docx.shared import Pt, RGBColor
-    import html
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import cm
+    from reportlab.lib import colors
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
 
-    doc = Document(str(input_path))
-    lines = []
-
-    lines.append("""<!DOCTYPE html><html><head><meta charset="UTF-8">
-    <style>
-      body { font-family: Arial, sans-serif; font-size: 12pt; margin: 2cm; line-height: 1.5; color: #000; }
-      h1 { font-size: 18pt; font-weight: bold; margin: 12pt 0 6pt; }
-      h2 { font-size: 16pt; font-weight: bold; margin: 10pt 0 5pt; }
-      h3 { font-size: 14pt; font-weight: bold; margin: 8pt 0 4pt; }
-      p  { margin: 6pt 0; }
-      table { border-collapse: collapse; width: 100%; margin: 10pt 0; }
-      td, th { border: 1px solid #ccc; padding: 6pt 8pt; }
-      th { background: #f0f0f0; font-weight: bold; }
-      .bold { font-weight: bold; }
-      .italic { font-style: italic; }
-      .underline { text-decoration: underline; }
-    </style></head><body>""")
-
-    for para in doc.paragraphs:
-        text = html.escape(para.text)
-        if not text.strip():
-            lines.append("<p>&nbsp;</p>")
-            continue
-        style = para.style.name.lower()
-        if 'heading 1' in style:
-            lines.append(f"<h1>{text}</h1>")
-        elif 'heading 2' in style:
-            lines.append(f"<h2>{text}</h2>")
-        elif 'heading 3' in style:
-            lines.append(f"<h3>{text}</h3>")
-        else:
-            # Applica stili inline
-            parts = []
-            for run in para.runs:
-                r = html.escape(run.text)
-                if run.bold:   r = f"<strong>{r}</strong>"
-                if run.italic: r = f"<em>{r}</em>"
-                if run.underline: r = f"<u>{r}</u>"
-                parts.append(r)
-            content = ''.join(parts) if parts else text
-            align = para.alignment
-            style_attr = ''
-            if align and align.name == 'CENTER': style_attr = ' style="text-align:center"'
-            elif align and align.name == 'RIGHT': style_attr = ' style="text-align:right"'
-            lines.append(f"<p{style_attr}>{content}</p>")
-
-    # Tabelle
-    for table in doc.tables:
-        lines.append("<table>")
-        for i, row in enumerate(table.rows):
-            lines.append("<tr>")
-            for cell in row.cells:
-                tag = "th" if i == 0 else "td"
-                lines.append(f"<{tag}>{html.escape(cell.text)}</{tag}>")
-            lines.append("</tr>")
-        lines.append("</table>")
-
-    lines.append("</body></html>")
-    return "\n".join(lines)
-
-
-def _xlsx_to_html(input_path: Path) -> str:
-    """Converte XLSX in HTML usando openpyxl."""
     try:
-        import openpyxl
-        import html as html_mod
-        wb = openpyxl.load_workbook(str(input_path), data_only=True)
-        ws = wb.active
-        lines = ["""<!DOCTYPE html><html><head><meta charset="UTF-8">
-        <style>body{font-family:Arial,sans-serif;font-size:11pt;margin:1.5cm;}
-        table{border-collapse:collapse;width:100%;}
-        td,th{border:1px solid #ccc;padding:5pt 8pt;font-size:10pt;}
-        th{background:#e8e8e8;font-weight:bold;}</style></head><body><table>"""]
-        for i, row in enumerate(ws.iter_rows(values_only=True)):
-            tag = "th" if i == 0 else "td"
-            lines.append("<tr>" + "".join(f"<{tag}>{html_mod.escape(str(c or ''))}</{tag}>" for c in row) + "</tr>")
-        lines.append("</table></body></html>")
-        return "\n".join(lines)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Errore lettura Excel: {str(e)}")
-
-
-def _pptx_to_html(input_path: Path) -> str:
-    """Converte PPTX in HTML usando python-pptx."""
-    try:
-        from pptx import Presentation
-        import html as html_mod
-        prs = Presentation(str(input_path))
-        lines = ["""<!DOCTYPE html><html><head><meta charset="UTF-8">
-        <style>body{font-family:Arial,sans-serif;margin:1cm;}
-        .slide{page-break-after:always;border:1px solid #ddd;padding:20pt;margin-bottom:20pt;min-height:400pt;}
-        h2{font-size:20pt;margin-bottom:10pt;}p{font-size:12pt;margin:4pt 0;}</style></head><body>"""]
-        for i, slide in enumerate(prs.slides, 1):
-            lines.append(f'<div class="slide"><p style="color:#999;font-size:9pt">Slide {i}</p>')
-            for shape in slide.shapes:
-                if hasattr(shape, "text") and shape.text.strip():
-                    text = html_mod.escape(shape.text.strip())
-                    if shape.shape_type == 13: continue
-                    lines.append(f"<p>{text}</p>")
-            lines.append("</div>")
-        lines.append("</body></html>")
-        return "\n".join(lines)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Errore lettura PowerPoint: {str(e)}")
-
-
-def _html_to_pdf(html_content: str, output_path: Path) -> Path:
-    """Converte HTML in PDF usando WeasyPrint (puro Python, no LibreOffice)."""
-    try:
-        from weasyprint import HTML, CSS
-        HTML(string=html_content).write_pdf(
+        doc = Document(str(input_path))
+        pdf_doc = SimpleDocTemplate(
             str(output_path),
-            stylesheets=[CSS(string="@page { margin: 2cm; size: A4; }")]
+            pagesize=A4,
+            leftMargin=2*cm, rightMargin=2*cm,
+            topMargin=2*cm, bottomMargin=2*cm
         )
+
+        styles = getSampleStyleSheet()
+        story = []
+
+        style_normal = ParagraphStyle('Normal', parent=styles['Normal'], fontSize=11, leading=16)
+        style_h1 = ParagraphStyle('H1', parent=styles['Heading1'], fontSize=18, spaceAfter=8)
+        style_h2 = ParagraphStyle('H2', parent=styles['Heading2'], fontSize=15, spaceAfter=6)
+        style_h3 = ParagraphStyle('H3', parent=styles['Heading3'], fontSize=13, spaceAfter=4)
+
+        for para in doc.paragraphs:
+            text = para.text.strip()
+            if not text:
+                story.append(Spacer(1, 6))
+                continue
+
+            safe = html_mod.escape(text)
+            style_name = para.style.name.lower()
+
+            if 'heading 1' in style_name:
+                story.append(Paragraph(safe, style_h1))
+            elif 'heading 2' in style_name:
+                story.append(Paragraph(safe, style_h2))
+            elif 'heading 3' in style_name:
+                story.append(Paragraph(safe, style_h3))
+            else:
+                # Applica bold/italic inline
+                parts = []
+                for run in para.runs:
+                    r = html_mod.escape(run.text)
+                    if not r:
+                        continue
+                    if run.bold and run.italic:
+                        r = f"<b><i>{r}</i></b>"
+                    elif run.bold:
+                        r = f"<b>{r}</b>"
+                    elif run.italic:
+                        r = f"<i>{r}</i>"
+                    parts.append(r)
+                content = ''.join(parts) if parts else safe
+                story.append(Paragraph(content, style_normal))
+                story.append(Spacer(1, 2))
+
+        # Tabelle
+        for table in doc.tables:
+            data = []
+            for row in table.rows:
+                data.append([html_mod.escape(cell.text) for cell in row.cells])
+            if data:
+                t = Table(data, hAlign='LEFT')
+                t.setStyle(TableStyle([
+                    ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
+                    ('BACKGROUND', (0,0), (-1,0), colors.lightgrey),
+                    ('FONTSIZE', (0,0), (-1,-1), 10),
+                    ('PADDING', (0,0), (-1,-1), 4),
+                ]))
+                story.append(t)
+                story.append(Spacer(1, 8))
+
+        if not story:
+            story.append(Paragraph("Documento vuoto", style_normal))
+
+        pdf_doc.build(story)
         return output_path
-    except ImportError:
-        raise HTTPException(status_code=500, detail="WeasyPrint non installato.")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Errore generazione PDF: {str(e)}")
 
-
-def word_to_pdf(input_path: Path, output_path: Path) -> Path:
-    """
-    Converte DOCX/DOC in PDF usando python-docx + WeasyPrint.
-    Nessuna dipendenza da LibreOffice — funziona con 512MB RAM.
-    """
-    try:
-        ext = input_path.suffix.lower()
-        if ext in ('.doc', '.docx', '.odt', '.rtf'):
-            html_content = _docx_to_html(input_path)
-        else:
-            # Testo semplice
-            text = input_path.read_text(encoding='utf-8', errors='replace')
-            import html as html_mod
-            html_content = f"<html><body><pre>{html_mod.escape(text)}</pre></body></html>"
-        return _html_to_pdf(html_content, output_path)
-    except HTTPException:
-        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Errore conversione Word→PDF: {str(e)}")
 
 
-def excel_to_pdf(input_path: Path, output_path: Path) -> Path:
-    """Converte XLSX/XLS in PDF usando openpyxl + WeasyPrint."""
+def _xlsx_to_pdf_reportlab(input_path: Path, output_path: Path) -> Path:
+    """Converte XLSX in PDF usando openpyxl + reportlab."""
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.units import cm
+    from reportlab.lib import colors
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+    from reportlab.lib.styles import getSampleStyleSheet
+
     try:
-        html_content = _xlsx_to_html(input_path)
-        return _html_to_pdf(html_content, output_path)
+        import openpyxl
+        wb = openpyxl.load_workbook(str(input_path), data_only=True)
+        ws = wb.active
+
+        data = []
+        for row in ws.iter_rows(values_only=True):
+            data.append([str(c) if c is not None else '' for c in row])
+
+        if not data:
+            raise HTTPException(status_code=400, detail="Foglio Excel vuoto.")
+
+        pdf_doc = SimpleDocTemplate(str(output_path), pagesize=landscape(A4),
+                                     leftMargin=1*cm, rightMargin=1*cm,
+                                     topMargin=1.5*cm, bottomMargin=1.5*cm)
+        styles = getSampleStyleSheet()
+        story = []
+        story.append(Paragraph(ws.title or "Foglio", styles['Heading2']))
+        story.append(Spacer(1, 8))
+
+        t = Table(data, repeatRows=1)
+        t.setStyle(TableStyle([
+            ('GRID', (0,0), (-1,-1), 0.4, colors.grey),
+            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#e0e0e0')),
+            ('FONTSIZE', (0,0), (-1,-1), 8),
+            ('PADDING', (0,0), (-1,-1), 3),
+            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+        ]))
+        story.append(t)
+        pdf_doc.build(story)
+        return output_path
+
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Errore conversione Excel→PDF: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Errore Excel→PDF: {str(e)}")
+
+
+def _pptx_to_pdf_reportlab(input_path: Path, output_path: Path) -> Path:
+    """Converte PPTX in PDF usando python-pptx + reportlab."""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import cm
+    from reportlab.lib import colors
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+
+    try:
+        from pptx import Presentation
+        prs = Presentation(str(input_path))
+        pdf_doc = SimpleDocTemplate(str(output_path), pagesize=A4,
+                                     leftMargin=2*cm, rightMargin=2*cm,
+                                     topMargin=2*cm, bottomMargin=2*cm)
+        styles = getSampleStyleSheet()
+        style_slide = ParagraphStyle('Slide', fontSize=9, textColor=colors.grey)
+        story = []
+
+        for i, slide in enumerate(prs.slides, 1):
+            story.append(Paragraph(f"— Slide {i} —", style_slide))
+            story.append(Spacer(1, 4))
+            for shape in slide.shapes:
+                if not hasattr(shape, "text") or not shape.text.strip():
+                    continue
+                text = html_mod.escape(shape.text.strip())
+                if shape == slide.shapes[0]:
+                    story.append(Paragraph(text, styles['Heading2']))
+                else:
+                    story.append(Paragraph(text, styles['Normal']))
+                story.append(Spacer(1, 4))
+            story.append(HRFlowable(width="100%", thickness=0.5, color=colors.lightgrey))
+            story.append(Spacer(1, 12))
+
+        if not story:
+            story.append(Paragraph("Presentazione vuota", styles['Normal']))
+
+        pdf_doc.build(story)
+        return output_path
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Errore PPTX→PDF: {str(e)}")
+
+
+def word_to_pdf(input_path: Path, output_path: Path) -> Path:
+    return _docx_to_pdf_reportlab(input_path, output_path)
+
+
+def excel_to_pdf(input_path: Path, output_path: Path) -> Path:
+    return _xlsx_to_pdf_reportlab(input_path, output_path)
 
 
 def pptx_to_pdf(input_path: Path, output_path: Path) -> Path:
-    """Converte PPTX in PDF usando python-pptx + WeasyPrint."""
-    try:
-        html_content = _pptx_to_html(input_path)
-        return _html_to_pdf(html_content, output_path)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Errore conversione PPTX→PDF: {str(e)}")
+    return _pptx_to_pdf_reportlab(input_path, output_path)
 
 
 def pdf_to_images(input_path: Path, output_dir: Path, fmt: str = "jpg", dpi: int = 150) -> list:
-    """
-    Converte ogni pagina PDF in immagine.
-    Usa PyMuPDF (fitz) se disponibile, altrimenti pdf2image.
-    """
+    """Converte ogni pagina PDF in immagine usando PyMuPDF."""
     try:
-        import fitz  # PyMuPDF
+        import fitz
         doc = fitz.open(str(input_path))
         paths = []
         for i, page in enumerate(doc):
             mat = fitz.Matrix(dpi / 72, dpi / 72)
             pix = page.get_pixmap(matrix=mat)
             out = output_dir / f"page_{i+1}.{fmt}"
-            if fmt.lower() in ("jpg", "jpeg"):
-                pix.save(str(out), "jpeg")
-            else:
-                pix.save(str(out))
+            pix.save(str(out), "jpeg" if fmt.lower() in ("jpg","jpeg") else fmt)
             paths.append(out)
         doc.close()
         return paths
-    except ImportError:
-        raise HTTPException(
-            status_code=500,
-            detail="PyMuPDF non installato. Esegui: pip install PyMuPDF"
-        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Errore PDF→Immagini: {str(e)}")
